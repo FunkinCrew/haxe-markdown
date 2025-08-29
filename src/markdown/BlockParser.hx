@@ -130,6 +130,11 @@ class BlockSyntax {
 	static var RE_FN = new EReg('^(?: {0,3})\\[\\^([^\\]\\s]+)\\]:\\s*(.*)$', '');
 
 	/**
+	 * GitHub styled (`note`, `tip`, `important`, `caution`, `warning`) alerts.
+	 */
+	static var RE_ALERT = new EReg('^\\s{0,3}>\\s{0,3}\\\\?\\[!(note|tip|important|caution|warning)\\\\?\\]\\s*$', 'i');
+
+	/**
 		Gets the collection of built-in block parsers. To turn a series of lines
 		into blocks, each of these will be tried in turn. Order matters here.
 	**/
@@ -138,7 +143,7 @@ class BlockSyntax {
 	static function get_syntaxes():Array<BlockSyntax> {
 		if (syntaxes == null) {
 			syntaxes = [
-				new EmptyBlockSyntax(), new BlockHtmlSyntax(), new SetextHeaderSyntax(), new HeaderSyntax(), new FootnoteDefSyntax(), new CodeBlockSyntax(),
+				new EmptyBlockSyntax(), new BlockHtmlSyntax(), new SetextHeaderSyntax(), new HeaderSyntax(), new FootnoteDefSyntax(), new AlertBlockSyntax(), new CodeBlockSyntax(),
 				new GitHubCodeBlockSyntax(), new BlockquoteSyntax(), new HorizontalRuleSyntax(), new UnorderedListSyntax(), new OrderedListSyntax(),
 				new TableSyntax(), new ParagraphSyntax()];
 		}
@@ -776,6 +781,79 @@ class FootnoteDefSyntax extends BlockSyntax {
 				parser.advance();
 			}
 		}
+		return childLines;
+	}
+}
+
+class AlertBlockSyntax extends BlockSyntax {
+	override function get_pattern():EReg {
+		return BlockSyntax.RE_ALERT;
+	}
+
+	override public function parse(parser:BlockParser):Node {
+		pattern.match(parser.current);
+		var type = pattern.matched(1).toLowerCase();
+
+		parser.advance();
+		var childLines = parseChildLines(parser);
+
+		var children = parser.document.parseLines(childLines);
+
+		var typeTextMap = [
+			"note" => "Note",
+			"tip" => "Tip",
+			"important" => "Important",
+			"caution" => "Caution",
+			"warning" => "Warning"
+		];
+
+		var titleText = typeTextMap[type];
+		var titleElement = new ElementNode('p', [new TextNode(titleText)]);
+		titleElement.attributes.set('class', 'markdown-alert-title');
+
+		var elementClass = 'markdown-alert markdown-alert-' + type;
+
+		var element = new ElementNode('div', cast [titleElement].concat(cast children));
+		element.attributes.set('class', elementClass);
+
+		return element;
+	}
+
+	var contentLineRegex = new EReg('>?\\s?(.*)*', '');
+
+	override public function parseChildLines(parser:BlockParser):Array<String> {
+		var childLines = [];
+		var lazyContinuation = false;
+
+		while (!parser.isDone) {
+			var lineContent = parser.current.ltrim();
+			var codeBlock:EReg = new EReg('^>?\\s*', '');
+			var strippedContent = codeBlock.replace(lineContent, '');
+			contentLineRegex.match(strippedContent);
+			var match = strippedContent.length == 0 && !lineContent.startsWith('>') ? null : contentLineRegex.matched(0);
+			if (match != null) {
+				childLines.push(strippedContent);
+				parser.advance();
+				lazyContinuation = false;
+				continue;
+			}
+
+			var lastLine = childLines.length == 0 ? '' : childLines[childLines.length - 1];
+
+			var otherMatched = BlockSyntax.syntaxes.find(function(s) return s.canParse(parser));
+
+			if ((Std.isOfType(otherMatched, ParagraphSyntax)
+				&& !BlockSyntax.RE_EMPTY.match(lastLine)
+				&& !BlockSyntax.RE_CODE.match(lastLine))
+				|| (Std.isOfType(otherMatched, CodeBlockSyntax) && !BlockSyntax.RE_INDENT.match(lineContent))) {
+				childLines.push(parser.current);
+				lazyContinuation = true;
+				parser.advance();
+			} else {
+				break;
+			}
+		}
+
 		return childLines;
 	}
 }
