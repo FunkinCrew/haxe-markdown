@@ -89,9 +89,11 @@ class BlockSyntax {
 	static var RE_BLOCKQUOTE = new EReg('^[ ]{0,3}>[ ]?(.*)$', '');
 
 	/**
-		A line indented four spaces. Used for code blocks and lists.
+		A line indented two or four spaces.
+		Used for lists (two spaces) and code blocks (four spaces).
 	**/
-	static var RE_INDENT = new EReg('^(?:    |\t)(.*)$', '');
+	static var RE_INDENT_2 = new EReg('^(?:  |\t)(.*)$', '');
+	static var RE_INDENT_4 = new EReg('^(?:    |\t)(.*)$', '');
 
 	/**
 		GitHub style triple quoted code block.
@@ -116,7 +118,7 @@ class BlockSyntax {
 		three leading spaces before the marker and any number of spaces or tabs
 		after.
 	**/
-	static var RE_UL = new EReg('^[ ]{0,3}[*+-][ \\t]+(.*)$', '');
+	static var RE_UL = new EReg('^[ ]{0,1}[*+-][ \\t]+(.*)$', '');
 
 	/**
 		A line starting with a number like `123.`. May have up to three leading
@@ -311,7 +313,7 @@ class BlockquoteSyntax extends BlockSyntax {
 // Parses preformatted code blocks that are indented four spaces.
 class CodeBlockSyntax extends BlockSyntax {
 	override function get_pattern():EReg {
-		return BlockSyntax.RE_INDENT;
+		return BlockSyntax.RE_INDENT_4;
 	}
 
 	override public function parseChildLines(parser:BlockParser):Array<String> {
@@ -441,10 +443,12 @@ class BlockHtmlSyntax extends BlockSyntax {
 
 class ListItem {
 	public var forceBlock:Bool = false;
+	public var isAbortedTask:Bool = false;
 	public var lines(default, null):Array<String>;
 
-	public function new(lines:Array<String>) {
+	public function new(lines:Array<String>, ?isAbortedTask:Bool) {
 		this.lines = lines;
+		this.isAbortedTask = isAbortedTask;
 	}
 }
 
@@ -473,9 +477,6 @@ class ParagraphSyntax extends BlockSyntax {
 
 // Base class for both ordered and unordered lists.
 class ListSyntax extends BlockSyntax {
-	override function get_canEndBlock() {
-		return false;
-	}
 
 	public var listTag(default, null):String;
 
@@ -487,11 +488,13 @@ class ListSyntax extends BlockSyntax {
 	override public function parse(parser:BlockParser):Node {
 		var items = [];
 		var childLines = [];
+		var isAbortedTask = false;
 
 		function endItem() {
 			if (childLines.length > 0) {
-				items.push(new ListItem(childLines));
+				items.push(new ListItem(childLines, isAbortedTask));
 				childLines = [];
+				isAbortedTask = false;
 			}
 		}
 
@@ -509,7 +512,7 @@ class ListSyntax extends BlockSyntax {
 				// End the current list item and start a new one.
 				endItem();
 				childLines.push(match.matched(1));
-			} else if (tryMatch(BlockSyntax.RE_INDENT)) {
+			} else if (tryMatch(BlockSyntax.RE_INDENT_2)) {
 				// Strip off indent and add to current item.
 				childLines.push(match.matched(1));
 			} else if (BlockSyntax.isAtBlockEnd(parser)) {
@@ -594,7 +597,7 @@ class ListSyntax extends BlockSyntax {
 				BlockSyntax.RE_BLOCKQUOTE,
 				BlockSyntax.RE_HEADER,
 				BlockSyntax.RE_HR,
-				BlockSyntax.RE_INDENT,
+				BlockSyntax.RE_INDENT_4,
 				BlockSyntax.RE_UL,
 				BlockSyntax.RE_OL,
 				BlockSyntax.RE_FN
@@ -610,27 +613,40 @@ class ListSyntax extends BlockSyntax {
 			}
 
 			// Parse the item as a block or inline.
-			if (blockItem) {
+			var children = if (blockItem) {
 				// Block list item.
 				var children = parser.document.parseLines(item.lines);
+				var nonListChildren = children.filter(c -> {
+					var c:ElementNode = cast c;
+					(c != null && c.tag != "ul" && c.tag != "ol");
+				});
 
 				// if we have a single p child we might have been forced into block
 				// mode by line breaks. if not forceBlock (empty line before/after)
 				// we can use text of p as li child <li><p>foo</p></li> -> <li>foo</li>
-				if (!item.forceBlock && children.length == 1) {
-					if ((children[0] is ElementNode)) {
-						var node:ElementNode = cast children[0];
-						if (node.tag == 'p')
-							children = node.children;
+				if (!item.forceBlock && nonListChildren.length == 1) {
+					var child = nonListChildren.shift();
+					if (child is ElementNode) {
+						var node:ElementNode = cast child;
+						if (node.tag == 'p') {
+							if (node.children.length == 1)
+								children = [for (c in children) if (c == node) node.children[0] else c];
+							else if (children.length == 1)
+								children = node.children;
+						}
 					}
 				}
 
-				itemNodes.push(new ElementNode('li', children));
+				children;
 			} else {
 				// Raw list item.
-				var contents = parser.document.parseInline(item.lines[0]);
-				itemNodes.push(new ElementNode('li', contents));
+				parser.document.parseInline(item.lines[0]);
 			}
+
+			var li = new ElementNode('li', children);
+			// Apply aborted task syntax
+			if (item.isAbortedTask) li.attributes.set("data-disabled", "");
+			itemNodes.push(li);
 		}
 
 		return new ElementNode(listTag, itemNodes);
@@ -845,7 +861,7 @@ class AlertBlockSyntax extends BlockSyntax {
 			if ((Std.isOfType(otherMatched, ParagraphSyntax)
 				&& !BlockSyntax.RE_EMPTY.match(lastLine)
 				&& !BlockSyntax.RE_CODE.match(lastLine))
-				|| (Std.isOfType(otherMatched, CodeBlockSyntax) && !BlockSyntax.RE_INDENT.match(lineContent))) {
+				|| (Std.isOfType(otherMatched, CodeBlockSyntax) && !BlockSyntax.RE_INDENT_4.match(lineContent))) {
 				childLines.push(parser.current);
 				lazyContinuation = true;
 				parser.advance();
